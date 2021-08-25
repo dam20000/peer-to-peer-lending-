@@ -1,0 +1,404 @@
+---
+title: " Peer Lending Project stage 2 - EDA"
+author: 'Group C'
+date: "7 4 2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(reshape2)
+library(zoo)
+```
+
+```{r}
+loan18Q1 = read_csv("C:/Users/dam20/Desktop/eran project/loan-data-apr-2018-snap/LoanStats_2016Q1.csv", skip = 1)
+loan18Q2 = read_csv("C:/Users/dam20/Desktop/eran project/loan-data-apr-2018-snap/LoanStats_2016Q2.csv", skip = 1)
+loan18Q3 = read_csv("C:/Users/dam20/Desktop/eran project/loan-data-apr-2018-snap/LoanStats_2016Q3.csv", skip = 1)
+loan18Q4 = read_csv("C:/Users/dam20/Desktop/eran project/loan-data-apr-2018-snap/LoanStats_2016Q4.csv", skip = 1)
+loan19Q1 = read_csv("C:/Users/dam20/Desktop/eran project/loan-data-jul-2019-snap/LoanStats_2016Q1.csv", skip = 1)
+loan19Q2 = read_csv("C:/Users/dam20/Desktop/eran project/loan-data-jul-2019-snap/LoanStats_2016Q2.csv", skip = 1)
+loan19Q3 = read_csv("C:/Users/dam20/Desktop/eran project/loan-data-jul-2019-snap/LoanStats_2016Q3.csv", skip = 1)
+loan19Q4 = read_csv("C:/Users/dam20/Desktop/eran project/loan-data-jul-2019-snap/LoanStats_2016Q4.csv", skip = 1)
+```
+
+
+
+-Bind quarters of each year to get 2 datasets.
+```{r}
+l18 = rbind(loan18Q1,loan18Q2,loan18Q3,loan18Q4)
+l19 = rbind(loan19Q1,loan19Q2,loan19Q3,loan19Q4)
+```
+
+
+-As seen from the plot below almost all of the loans "Fully paid", "Charged off" or "Current". We decided to keep only loans that are either "Fully paid" or "Charged off"
+-From the second plot we see there are much more loans for 36 months, we keep only loan for 36 month and drop loans for 60 month since population behavior can change.
+-We dropped loans that had joint application with two co-borrowers. We decided to keep only the loans of individual applications since the number of co-borrowers is negligent and the population behavior might vary.
+
+```{r}
+l19 %>% ggplot(mapping = aes(x = loan_status))+geom_bar() +
+   theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+
+l19 = l19 %>% filter(loan_status %in% c("Fully Paid", "Charged Off"))
+
+l19 %>% ggplot(mapping = aes(x = term))+geom_bar()
+
+l19 = l19 %>% filter(term == "36 months")
+
+l19 %>% ggplot(mapping = aes(x = application_type))+geom_bar()
+
+l19 = l19 %>% filter(application_type == "Individual")
+```
+
+- Compare columns names to make sure they are ordered exactly the same.
+```{r}
+
+colnames(l19[,142:150])
+cat("\n")
+colnames(l18[,142:151])
+
+sum(colnames(l19) != colnames(l18[,-144])) #It appears there is 1 columns on the 2018 snapshot that does not appear in 2019, we will drop the column and explore it separately.
+
+disbursement_method = l18[,144]
+l18 = l18[,-144]
+```
+
+
+-Find columns with large fraction of missing data, set a proper threshold and drop them. The remaining columns containing missing value will be dealt with after we finish screening attributes and before we start visualization.
+```{r}
+missing = tibble(Name = character(), Missing_frac = double())
+
+for(i in 1:length(l19)) {
+    if (sum(is.na(l19[,i]))>0){
+       missing = rbind(missing, data.frame(Name = colnames(l19[,i]),
+                                 Missing_frac = 100 *sum(is.na(l19[,i]))/nrow(l19)))
+    }
+}
+
+missing %>% arrange(desc(Missing_frac))
+
+missing_to_drop = missing %>% filter(Missing_frac>40) #Set threshold for removing columns with NA's
+
+missing_to_drop = missing_to_drop[,1]
+
+l19 = l19 %>% select(-missing_to_drop)
+l18 = l18 %>% select(-missing_to_drop)
+```
+
+Realized return calculation:
+
+-Parse relevant dates columns
+```{r}
+l19$issue_d = parse_date(l19$issue_d, format = "%b-%y")
+l19$last_pymnt_d = parse_date(l19$last_pymnt_d, format = "%b-%y")
+
+l18$issue_d = parse_date(l18$issue_d, format = "%b-%y")
+l18$last_pymnt_d = parse_date(l18$last_pymnt_d, format = "%b-%y")
+```
+
+-check what are the columns are contaiend in the total payment column 
+```{r}
+l19 %>% transmute(total_pymnt = total_pymnt, total_paid =
+                     total_rec_late_fee+recoveries+total_rec_prncp+total_rec_int)
+```
+- it seems that "collection_recovery_fee" is not included in the total payment columns, so we will add it in our calculation of the realized return
+
+
+```{r}
+defalut_yeild = 1.02^(1/12) - 1 #2% yearly yield in months
+l19$term = 36; l18$term = 36 # transform "term" to numeric
+
+l19 = l19 %>% mutate(duration = (interval(l19$issue_d, l19$last_pymnt_d,) %/% months(1))) # add column of duration of loans in months
+
+l19 = separate(l19, int_rate, sep = "%", into = c("int_rate","drop")) #drop "%" from interest rate
+l19$int_rate = as.double(l19$int_rate)/100 
+
+l18 = separate(l18, int_rate, sep = "%", into = c("int_rate","drop")) #drop "%" from interest rate
+l18$int_rate = as.double(l18$int_rate)/100 
+
+
+l19 = l19 %>% mutate(realized_return = (12/term) *(1/funded_amnt) * #create realized return column
+                     (( ((total_pymnt + collection_recovery_fee)/duration)*
+                        ((1-(1+defalut_yeild)^duration))/(1-(1+defalut_yeild)))*
+                        ((1+defalut_yeild)^(term - duration)) - funded_amnt) ) 
+
+l19 = l19 %>% select(-drop)
+l18 = l18 %>% select(-drop)
+
+```
+
+
+
+
+-Find columns with that has the same one value in more then 90% of the loans, and drop them.
+
+```{r}
+high_uniq = tibble(Name = character(), Missing_frac = double())
+
+get_mode <- function(var) { #get most freaquent value for a column
+   freq_var <- table(var)
+   names(freq_var[freq_var==max(freq_var, na.rm = T)])
+}
+
+for (i in 1:ncol(l19)){ #find the proportion of the most frequent value from every column
+   col <- l19[, i]
+   mode <- get_mode(col)
+   high_uniq = rbind(high_uniq, tibble(Name = colnames(l19[,i]),
+                                 common_val_frac = 100 *(sum(col == mode, na.rm = T)/nrow(col))))
+   
+}
+
+#high_uniq %>% arrange(desc(common_val_frac))
+
+high_uniq = high_uniq %>% filter(common_val_frac>90) #Set threshold for removing columns with one too frequent value
+
+high_uniq = high_uniq$Name # get the columns names
+
+
+#drop them
+l19 = l19 %>% select(-high_uniq)
+l18 = l18 %>% select(-high_uniq)
+```
+
+
+
+
+-Find columns that changed between 2018 - 2019
+```{r}
+joined = left_join(l19,l18,by = "id", copy = True, suffix = c(".19",".18")) #join tables
+changed = joined[,1] # create a new DF with the column "id"
+
+
+for (i in 2:89) { #Append columns only if they have changed between 18-19
+   if (identical(c(joined[,i])[[1]],c(joined[,i+90])[[1]]) == F){
+      changed = cbind(changed,joined[,i])
+      changed = cbind(changed,joined[,i+90])
+   }
+}
+
+
+print(changed) #The table shows the changes columns values in 2018 and 2019
+
+
+```
+
+-To explore the changed columns we will go one by one and determine whether the column from 2018 contains any relevant information for our model or alternatively the attributes changes with time and cannot be trusted to use in our model since we cannot know their future value when predicting the realized return of a new loan.
+In addition we will check the magnitude of change, meaning in how many instances the column varied between 2018-2019.
+
+-Check how many values have changed for each column
+```{r}
+
+mag_changed = tibble(Name = character(), inst_changed = double())
+
+for (i in seq(2,30,2)){
+   mag_changed = rbind(mag_changed, data.frame(Name = colnames(changed)[i],
+                                 inst_changed = sum(changed[,i]!=changed[,i+1],na.rm = T)))
+}
+
+mag_changed %>% mutate(frac_changed = inst_changed/nrow(l19) *100) %>% arrange(inst_changed)
+
+leakage_to_drop = c("recoveries",
+"last_pymnt_amnt",
+"last_pymnt_d",
+"total_rec_prncp",
+"total_rec_int",
+"last_fico_range_high",
+"last_fico_range_low",
+"total_pymnt_inv",
+"last_credit_pull_d")
+
+#total_pymnt, collection_recovery_fee - we keep them for checking correlation since we used them for our main attribute calculation
+
+
+l19 = l19 %>% select(-leakage_to_drop)
+# l18 = l18 %>% select(-leakage_to_drop)
+
+
+```
+int_rate - negligent number of changed values, attribute will be kept
+
+installment - negligent number of changed values, attribute will be kept
+
+verification_status - negligent number of changed values, attribute will be kept
+
+loan_status - keep
+
+collection_recovery_fee, total_pymnt - we keep them for checking correlation since we used them for our main attribute calculation
+
+
+{recoveries
+last_pymnt_amnt
+last_pymnt_d
+total_rec_prncp
+total_rec_int
+last_fico_range_high
+last_fico_range_low
+total_pymnt_inv
+last_credit_pull_d} - Makes sense this have changed, cannot predict what will happen to the attribute when loan progresses, attribute will be dropped
+
+---------------------------
+
+
+- From this point there is no need for the 2018 snapshot of the loans, we will keep clening and exploring the 2019 version.
+
+
+
+-After droping NA's columns we are left with 26 columns with mussing value of 1%-13% of all data, at this time we will keep them, both rows and columns. when we move foreword to the modeling stage we will use a more elaborate way to replace the missing values such as KNN for categorical attributes and Linear regression for numeric attributes. 
+```{r}
+l19 = separate(l19, revol_util, sep = "%", into = c("revol_util","drop")) #drop "%" from "revol util"
+l19$revol_util = as.double(l19$revol_util)/100 
+
+l19 = l19 %>% select(-drop)
+
+l19$emp_length = as.numeric(gsub("([0-9]+).*$", "\\1", l19$emp_length)) #extract number from column emp_length,errors are for the non numeric columns
+
+
+# l19 <- replace(l19, TRUE, lapply(l19, na.aggregate)) #replcae NA with mean, errors are for the non numeric columns
+```
+
+
+
+- We remove these columns after reviewing manually on their description and they are considered irrelevant.
+```{r}
+irrelevant = c("acc_open_past_24mths",
+"earliest_cr_line",
+"funded_amnt_inv",
+"inq_last_12m",
+"issue_d",
+"mo_sin_old_il_acct",
+"mo_sin_old_rev_tl_op",
+"mo_sin_rcnt_rev_tl_op",
+"mo_sin_rcnt_tl",
+"mths_since_rcnt_il",
+"mths_since_recent_bc",
+"mths_since_recent_inq",
+"num_actv_rev_tl",
+"num_tl_op_past_12m",
+"open_acc_6m",
+"open_il_12m",
+"open_il_24m",
+"open_rv_12m",
+"open_rv_24m",
+"title",
+"total_acc",
+"url",
+"zip_code",
+"inq_last_6mths")
+
+
+l19 = l19 %>% select(-irrelevant)
+```
+
+
+Correlation:
+
+- Now we will check correlation (spearman and pearson) of attributes with out main attribute - realized return, in addtion we will check correlation with total_pymnt, collection_recovery_fee and funded_amnt since we used them to calculate the realized return.
+
+
+For better visualization we split out data to 3 sub matrices and produced a heatmap fir each one with our relevant attributes.
+```{r}
+corl19 = l19[,sapply(l19,is.numeric)] #get only numeric columns
+
+to_check = corl19 %>% select(total_pymnt, collection_recovery_fee, funded_amnt, realized_return)
+corl19 = corl19 %>% select(-c(total_pymnt, collection_recovery_fee, funded_amnt, realized_return))
+
+subcor1 = corl19[,1:15]
+subcor2 = corl19[,15:30]
+subcor3 = corl19[,30:45]
+
+#pearson
+mat_cor = cor(cbind(subcor2, to_check), method = c("pearson"),use = "complete")
+mat_cor <- round(mat_cor,2)
+#mat_cor %>% arrange(value)
+mat_cor <- melt(mat_cor)
+
+ggplot(data = mat_cor, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_raster() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=0.6)) +
+   scale_fill_gradient2(low = "yellow", high = "red", mid = "white") + labs(title = "Pearson correlation")
+
+
+
+#spearman
+mat_cor = cor(cbind(subcor1, to_check), method = c("spearman"),use = "complete")
+mat_cor <- round(mat_cor,2)
+mat_cor <- melt(mat_cor)
+
+ggplot(data = mat_cor, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_raster() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=0.6)) +
+   scale_fill_gradient2(low = "yellow", high = "red", mid = "white") + labs(title = "Spearman correlation")
+
+
+
+
+```
+
+-It is hard to make decisions regarding what variables to drop based on the plots, however it seems that no attribute has strong linear correlation with our target variable (realized return). that might suggest we should use a non-linear model and therefore we will not drop attribute based on that (yet). There are few attributes with better spearman correlation with the realized return but also not very high.
+
+-There are some attributes with correlation with the attributes used to calculate realized return.
+
+It seems that some attributes has strong correlations (not with realized return), that means some of them are redunded. we will not drop them now, insted we will create a table with every combination of the attributes and their correlations and use it in feacher selction in the modeling stage. some will be dropped based on that or based on our feacher selection metric (e.g. forword selection), alternately we will consider creating new variubles based on attributes with strong correlation to maxsimize our benefit from them.
+
+
+```{r}
+corl19 = l19[,sapply(l19,is.numeric)]
+mat_cor_pearson = cor(corl19, method = c("pearson"),use = "complete")
+mat_cor_pearson <- round(mat_cor_pearson,3)
+
+mat_cor_pearson <- melt(mat_cor_pearson, value.name = "pearson")
+
+#mat_cor_pearson %>% arrange(value) %>% view()
+
+
+
+
+mat_cor_spearman = cor(corl19, method = c("spearman"),use = "complete")
+mat_cor_spearman <- round(mat_cor_spearman,3)
+
+mat_cor_spearman <- melt(mat_cor_spearman, value.name = "spearman")
+
+#mat_cor_spearman %>% arrange(value) %>% view()
+
+```
+
+
+-After checking both linear and non-linear correlation of all attributes with our main feacher and the feacher used to calculate it we decided to remove all attributes that has less them 0.07 abselut correlation, both pearson and spearman, with our main feacher and the feacher used to calculate it
+```{r}
+all_cor = left_join(mat_cor_pearson, mat_cor_spearman, by = c("Var1", "Var2"))
+
+all_cor = all_cor %>% filter(Var2 %in% c("total_pymnt", "collection_recovery_fee", "funded_amnt", "realized_return")) %>% filter(between(pearson,-0.07,0.07) & between(spearman,-0.07,0.07))
+
+all_cor = all_cor %>% group_by(Var1) %>% count() %>% filter(n == 4)
+
+all_cor = as.character(all_cor$Var1)
+
+l19 = l19 %>% select(-all_cor)
+```
+
+
+-----------------------------
+
+-Now we will produce some plots to get a better understanding of the data
+
+```{r}
+l19 %>% ggplot(mapping = aes(x = realized_return))+geom_histogram(col = "blue", bins = 50) +
+   xlab("Realized return") + labs(title = "Distrabution of Realized return")
+
+
+#l19 %>% ggplot(mapping = aes(x = relized_return, y = loan_status))+geom_boxplot() +xlab("Realized return") + labs(title = "Distrabution of Realized return by loan status")
+
+l19 %>% ggplot(mapping = aes(x = realized_return, y = grade))+geom_boxplot() +
+   xlab("Realized return") + labs(title = "Distrabution of Realized return by loan status and grade") +facet_grid(~loan_status)
+
+
+```
+
+```{r}
+return_mean_purp = l19 %>% group_by(purpose) %>% summarise(mean_return = mean(realized_return, na.rm = T)) 
+
+return_mean_purp %>% ggplot(mapping = aes(x = purpose, y = mean_return))+geom_col(col = "blue") + 
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=0.8, size = 15)) + labs(title = "Mean return by purpose")
+```
+
+
